@@ -1,5 +1,37 @@
-# Only parameters currently supported by the scaffold are listed here.
-# TODO(student): Design and implement camera parameters before adding them.
 /hikrobot_camera:
   ros__parameters:
+
+    # ROS 2 simulation time
     use_sim_time: false
+
+    # ============================================================
+    # Camera selection
+    # ============================================================
+
+    # USB camera does not use an IP address.
+    camera_ip: ""
+
+    # Your Hikrobot camera serial number.
+    serial_number: "DB0178696"
+
+    # ============================================================
+    # ROS image topic
+    # ============================================================
+
+    image_topic: "/image_raw"
+
+    # ============================================================
+    # Camera parameters
+    # ============================================================
+
+    # Exposure time, unit: microsecond
+    exposure_time: 10000.0
+
+    # Camera gain
+    gain: 0.0
+
+    # Acquisition frame rate
+    frame_rate: 30.0
+
+    # Pixel format
+    pixel_format: "Mono8"
