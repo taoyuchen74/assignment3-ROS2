@@ -46,6 +46,11 @@ private:
     const std::string & sdk_name,
     double value);
 
+  bool set_enum_parameter(
+    const std::string & sdk_name,
+    unsigned int value,
+    bool allow_unsupported = false);
+
   bool set_frame_rate(double value);
 
   bool set_pixel_format(
@@ -58,7 +63,12 @@ private:
   std::string ip_to_string(
     unsigned int ip) const;
 
+  bool device_matches(
+    const MV_CC_DEVICE_INFO * device) const;
+
   bool current_camera_present() const;
+
+  void start_reconnect_timer();
 
   // MVS camera
   void * camera_handle_{nullptr};

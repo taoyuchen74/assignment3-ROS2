@@ -95,7 +95,9 @@ CameraNode::CameraNode(
   if (!initialize_camera()) {
     RCLCPP_WARN(
       get_logger(),
-      "No Hikrobot camera is currently available.");
+      "No Hikrobot camera is currently available. "
+      "Check the USB connection and close the MVS "
+      "client if it is running.");
   }
 
   // ============================================================
@@ -127,13 +129,7 @@ CameraNode::CameraNode(
   // ============================================================
 
   if (!connected_) {
-
-    reconnect_timer_ =
-      create_wall_timer(
-        std::chrono::seconds(2),
-        std::bind(
-          &CameraNode::reconnect_camera,
-          this));
+    start_reconnect_timer();
   }
 
   if (connected_) {
@@ -247,8 +243,7 @@ bool CameraNode::connect_camera()
     return false;
   }
 
-  MV_CC_DEVICE_INFO * selected_device =
-    nullptr;
+  std::vector<MV_CC_DEVICE_INFO *> matches;
 
   // --------------------------------------------------------------
   // Camera selection
@@ -261,52 +256,76 @@ bool CameraNode::connect_camera()
     auto * device =
       device_list_.pDeviceInfo[i];
 
-    if (device == nullptr) {
-      continue;
+    if (device_matches(device)) {
+      matches.push_back(device);
+    }
+  }
+
+  if (matches.empty()) {
+    if (serial_number_.empty() && camera_ip_.empty()) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "No camera identifier is configured; "
+        "set camera_ip or serial_number.");
+    } else {
+      RCLCPP_ERROR(
+        get_logger(),
+        "No camera matches the configured "
+        "IP/serial number.");
     }
 
-    bool serial_match = true;
-    bool ip_match = true;
+    std::ostringstream discovered_devices;
 
-    if (!serial_number_.empty()) {
+    for (unsigned int i = 0;
+         i < device_list_.nDeviceNum;
+         ++i) {
 
-      serial_match =
-        get_serial_number(device)
-        == serial_number_;
-    }
+      if (i > 0) {
+        discovered_devices << ", ";
+      }
 
-    if (!camera_ip_.empty()) {
+      const auto * device = device_list_.pDeviceInfo[i];
 
-      if (device->nTLayerType ==
-          MV_GIGE_DEVICE) {
+      if (device == nullptr) {
+        discovered_devices << "unknown";
+        continue;
+      }
 
-        ip_match =
-          ip_to_string(
-            device->SpecialInfo
-              .stGigEInfo
-              .nCurrentIp)
-          == camera_ip_;
+      discovered_devices
+        << "serial="
+        << get_serial_number(device);
 
-      } else {
-        ip_match = false;
+      if (device->nTLayerType == MV_GIGE_DEVICE) {
+        discovered_devices
+          << " ip="
+          << ip_to_string(
+               device->SpecialInfo
+                 .stGigEInfo
+                 .nCurrentIp);
       }
     }
 
-    if (serial_match && ip_match) {
-      selected_device = device;
-      break;
-    }
-  }
-
-  if (selected_device == nullptr) {
-
     RCLCPP_ERROR(
       get_logger(),
-      "No camera matches the requested "
-      "IP/serial number.");
+      "Discovered %u device(s): %s.",
+      device_list_.nDeviceNum,
+      discovered_devices.str().c_str());
 
     return false;
   }
+
+  if (matches.size() > 1) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Multiple cameras (%zu) match the configured "
+      "identifier; set camera_ip and serial_number "
+      "to select one device.",
+      matches.size());
+    return false;
+  }
+
+  MV_CC_DEVICE_INFO * selected_device =
+    matches.front();
 
   // --------------------------------------------------------------
   // Create handle
@@ -339,10 +358,31 @@ bool CameraNode::connect_camera()
 
   if (ret != MV_OK) {
 
-    RCLCPP_ERROR(
-      get_logger(),
-      "MV_CC_OpenDevice failed: 0x%x",
-      ret);
+    if (ret ==
+          static_cast<int>(MV_E_DEV_BUSY) ||
+        ret ==
+          static_cast<int>(MV_E_BUSY)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "MV_CC_OpenDevice failed: 0x%x. "
+        "The camera is busy or occupied by "
+        "another application.",
+        ret);
+    } else if (
+      ret ==
+      static_cast<int>(MV_E_ACCESS_DENIED)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "MV_CC_OpenDevice failed: 0x%x. "
+        "Permission denied; check MVS udev rules "
+        "or user permissions.",
+        ret);
+    } else {
+      RCLCPP_ERROR(
+        get_logger(),
+        "MV_CC_OpenDevice failed: 0x%x",
+        ret);
+    }
 
     MV_CC_DestroyHandle(
       camera_handle_);
@@ -487,32 +527,15 @@ bool CameraNode::configure_camera()
     return false;
   }
 
-  // Disable automatic exposure.
-  int ret =
-    MV_CC_SetEnumValue(
-      camera_handle_,
-      "ExposureAuto",
-      0);
-
-  if (ret != MV_OK) {
-    RCLCPP_WARN(
-      get_logger(),
-      "Failed to disable automatic exposure: 0x%x",
-      ret);
+  // Manual exposure/gain require automatic modes off.
+  if (!set_enum_parameter(
+      "ExposureAuto", 0, true)) {
+    return false;
   }
 
-  // Disable automatic gain.
-  ret =
-    MV_CC_SetEnumValue(
-      camera_handle_,
-      "GainAuto",
-      0);
-
-  if (ret != MV_OK) {
-    RCLCPP_WARN(
-      get_logger(),
-      "Failed to disable automatic gain: 0x%x",
-      ret);
+  if (!set_enum_parameter(
+      "GainAuto", 0, true)) {
+    return false;
   }
 
   if (!set_float_parameter(
@@ -572,6 +595,17 @@ void CameraNode::grab_image()
 
     ++consecutive_grab_failures_;
 
+    if (consecutive_grab_failures_ >= 10) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Too many consecutive grab failures; "
+        "reconnecting the camera.");
+
+      disconnect_camera();
+      start_reconnect_timer();
+      return;
+    }
+
     RCLCPP_WARN_THROTTLE(
       get_logger(),
       *get_clock(),
@@ -621,30 +655,13 @@ void CameraNode::monitor_camera_connection()
         "Hikrobot camera is no longer detected.");
 
       disconnect_camera();
-
-      if (!reconnect_timer_) {
-
-        reconnect_timer_ =
-          create_wall_timer(
-            std::chrono::seconds(2),
-            std::bind(
-              &CameraNode::reconnect_camera,
-              this));
-      }
+      start_reconnect_timer();
     }
 
     return;
   }
 
-  if (!reconnect_timer_) {
-
-    reconnect_timer_ =
-      create_wall_timer(
-        std::chrono::seconds(2),
-        std::bind(
-          &CameraNode::reconnect_camera,
-          this));
-  }
+  start_reconnect_timer();
 }
 
 
@@ -670,58 +687,17 @@ bool CameraNode::current_camera_present() const
     return false;
   }
 
-  if (!serial_number_.empty()) {
+  for (unsigned int i = 0;
+       i < current_list.nDeviceNum;
+       ++i) {
 
-    for (unsigned int i = 0;
-         i < current_list.nDeviceNum;
-         ++i) {
-
-      const auto * device =
-        current_list.pDeviceInfo[i];
-
-      if (device == nullptr) {
-        continue;
-      }
-
-      if (get_serial_number(device)
-          == serial_number_) {
-        return true;
-      }
+    if (device_matches(
+          current_list.pDeviceInfo[i])) {
+      return true;
     }
-
-    return false;
   }
 
-  if (!camera_ip_.empty()) {
-
-    for (unsigned int i = 0;
-         i < current_list.nDeviceNum;
-         ++i) {
-
-      const auto * device =
-        current_list.pDeviceInfo[i];
-
-      if (device == nullptr) {
-        continue;
-      }
-
-      if (device->nTLayerType ==
-          MV_GIGE_DEVICE) {
-
-        if (ip_to_string(
-              device->SpecialInfo
-                .stGigEInfo
-                .nCurrentIp)
-            == camera_ip_) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  return current_list.nDeviceNum > 0;
+  return false;
 }
 
 
@@ -931,6 +907,57 @@ bool CameraNode::set_float_parameter(
 
 
 // ================================================================
+// Set enum parameter
+// ================================================================
+
+bool CameraNode::set_enum_parameter(
+  const std::string & sdk_name,
+  unsigned int value,
+  bool allow_unsupported)
+{
+  if (camera_handle_ == nullptr) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Cannot set %s: camera is not connected.",
+      sdk_name.c_str());
+
+    return false;
+  }
+
+  int ret =
+    MV_CC_SetEnumValue(
+      camera_handle_,
+      sdk_name.c_str(),
+      value);
+
+  if (ret != MV_OK) {
+    if (allow_unsupported &&
+        ret ==
+          static_cast<int>(MV_E_NOT_IMPLEMENTED)) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%s is not supported by this camera; "
+        "continuing without changing it.",
+        sdk_name.c_str());
+
+      return true;
+    }
+
+    RCLCPP_ERROR(
+      get_logger(),
+      "Failed to set %s=%u: 0x%x",
+      sdk_name.c_str(),
+      value,
+      ret);
+
+    return false;
+  }
+
+  return true;
+}
+
+
+// ================================================================
 // Set frame rate
 // ================================================================
 
@@ -999,23 +1026,9 @@ bool CameraNode::set_pixel_format(
     return false;
   }
 
-  int ret =
-    MV_CC_SetEnumValue(
-      camera_handle_,
-      "PixelFormat",
-      PixelType_Gvsp_Mono8);
-
-  if (ret != MV_OK) {
-
-    RCLCPP_ERROR(
-      get_logger(),
-      "Failed to set PixelFormat=Mono8: 0x%x",
-      ret);
-
-    return false;
-  }
-
-  return true;
+  return set_enum_parameter(
+    "PixelFormat",
+    PixelType_Gvsp_Mono8);
 }
 
 
@@ -1038,30 +1051,45 @@ CameraNode::on_parameter_change(
     const std::string & name =
       parameter.get_name();
 
-    // Camera selection and topic cannot be changed
-    // while the node is actively running.
+    // Camera selection and topic are startup-only
+    // parameters.
     if (name == "camera_ip" ||
         name == "serial_number" ||
         name == "image_topic") {
 
-      if (connected_) {
+      result.successful = false;
+      result.reason =
+        name +
+        " cannot be changed at runtime; "
+        "restart the node with the new value.";
 
-        result.successful = false;
+      return result;
+    }
 
-        result.reason =
-          "camera_ip, serial_number and image_topic "
-          "cannot be changed while running.";
+    if (camera_handle_ == nullptr) {
+      result.successful = false;
+      result.reason =
+        name +
+        " cannot be changed while no camera "
+        "is connected.";
 
-        return result;
-      }
-
-      continue;
+      return result;
     }
 
     if (name == "exposure_time") {
 
       const double value =
         parameter.as_double();
+
+      if (!set_enum_parameter(
+          "ExposureAuto", 0, true)) {
+        result.successful = false;
+        result.reason =
+          "Failed to disable automatic exposure "
+          "before setting exposure_time.";
+
+        return result;
+      }
 
       if (!set_float_parameter(
           "exposure_time",
@@ -1084,6 +1112,16 @@ CameraNode::on_parameter_change(
 
       const double value =
         parameter.as_double();
+
+      if (!set_enum_parameter(
+          "GainAuto", 0, true)) {
+        result.successful = false;
+        result.reason =
+          "Failed to disable automatic gain "
+          "before setting gain.";
+
+        return result;
+      }
 
       if (!set_float_parameter(
           "gain",
@@ -1142,6 +1180,57 @@ CameraNode::on_parameter_change(
   }
 
   return result;
+}
+
+
+// ================================================================
+// Device matching
+// ================================================================
+
+bool CameraNode::device_matches(
+  const MV_CC_DEVICE_INFO * device) const
+{
+  if (device == nullptr) {
+    return false;
+  }
+
+  if (!serial_number_.empty() &&
+      get_serial_number(device) != serial_number_) {
+    return false;
+  }
+
+  if (!camera_ip_.empty()) {
+
+    if (device->nTLayerType != MV_GIGE_DEVICE) {
+      return false;
+    }
+
+    if (ip_to_string(
+          device->SpecialInfo
+            .stGigEInfo
+            .nCurrentIp) != camera_ip_) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
+// ================================================================
+// Start reconnect timer
+// ================================================================
+
+void CameraNode::start_reconnect_timer()
+{
+  if (!reconnect_timer_) {
+    reconnect_timer_ =
+      create_wall_timer(
+        std::chrono::seconds(2),
+        std::bind(
+          &CameraNode::reconnect_camera,
+          this));
+  }
 }
 
 

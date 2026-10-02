@@ -8,14 +8,17 @@
     # Camera selection
     # ============================================================
 
+    # camera_ip / serial_number / image_topic 仅在启动时生效，
+    # 运行时修改会被节点拒绝，需重启后生效。
+
     # GigE camera IP address.
     # Leave empty when using a USB camera.
     camera_ip: ""
 
     # Camera serial number.
     # The current camera used for testing:
-    # DB0178696
-    serial_number: "DB0178696"
+    # 00F78118392
+    serial_number: "00F78118392"
 
     # ============================================================
     # ROS image topic

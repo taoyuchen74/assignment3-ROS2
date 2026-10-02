@@ -29,6 +29,8 @@
 - YAML 参数配置
 - 相机连接状态监控
 - 相机断开后的重新枚举与重连机制
+- 设备不存在、标识冲突或被占用时的明确错误反馈
+- 连续取流失败后的自动重连
 
 ---
 
@@ -92,6 +94,16 @@ assignment3-ROS2/
 cd ~/assignment3-ROS2
 ```
 
+先加载 ROS 2 Humble 环境，并安装 `package.xml` 中的依赖：
+
+```bash
+source /opt/ros/humble/setup.bash
+rosdep install --from-paths src --ignore-src -r -y
+```
+
+> MVS SDK 不在 apt/rosdep 依赖中，需要单独安装到 `/opt/MVS`。如果安装在
+> 其他路径，可用 `-DMVS_ROOT=/path/to/MVS` 覆盖。
+
 编译：
 
 ```bash
@@ -130,7 +142,7 @@ src/hikrobot_camera/config/camera.yaml
 
     camera_ip: ""
 
-    serial_number: "DB0178696"
+    serial_number: "00F78118392"
 
     image_topic: "/image_raw"
 
@@ -152,7 +164,7 @@ src/hikrobot_camera/config/camera.yaml
 推荐 USB 相机使用序列号：
 
 ```yaml
-serial_number: "DB0178696"
+serial_number: "00F78118392"
 camera_ip: ""
 ```
 
@@ -179,10 +191,13 @@ serial_number: ""
 
 ```yaml
 camera_ip: "192.168.1.100"
-serial_number: "DB0178696"
+serial_number: "00F78118392"
 ```
 
 程序要求设备同时满足 IP 和序列号条件。
+
+如果未配置任何标识且发现多台相机，节点会报告标识冲突并拒绝随机选择；
+如果设备不存在、已被其他程序占用或权限不足，节点会输出明确错误信息。
 
 ---
 
@@ -199,7 +214,7 @@ ros2 launch hikrobot_camera camera.launch.py
 ```text
 Starting Hikrobot MVS camera node...
 Found 1 camera(s).
-Camera 0: serial=DB0178696
+Camera 0: serial=00F78118392
 Camera device opened.
 Hikrobot camera connected and started grabbing.
 Hikrobot camera connected successfully.
@@ -324,7 +339,7 @@ Encoding: mono8
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---:|---|
 | `camera_ip` | string | `""` | GigE 相机 IP |
-| `serial_number` | string | `DB0178696` | 相机序列号 |
+| `serial_number` | string | `00F78118392` | 相机序列号 |
 | `image_topic` | string | `/image_raw` | 图像话题 |
 | `exposure_time` | double | `10000.0` | 曝光时间 |
 | `gain` | double | `0.0` | 相机增益 |
@@ -340,6 +355,10 @@ ros2 param list /hikrobot_camera
 ---
 
 ## 13. 动态修改参数
+
+`camera_ip`、`serial_number`、`image_topic` 是启动参数，运行时修改会被拒绝，
+需要修改配置后重启节点。`exposure_time`、`gain`、`frame_rate`、`pixel_format`
+在相机已连接时可以动态修改；未连接时会被拒绝。
 
 ### 13.1 修改帧率
 
@@ -372,6 +391,7 @@ ros2 param set /hikrobot_camera exposure_time 5000.0
 ```
 
 程序会通过 MVS SDK 查询相机支持的参数范围，并在设置之前进行范围检查。
+写入前会先关闭自动曝光，避免自动模式覆盖手动曝光。
 
 ---
 
@@ -384,6 +404,7 @@ ros2 param set /hikrobot_camera gain 5.0
 ```
 
 具体允许范围由当前相机的 MVS SDK 参数范围决定。
+写入前会先关闭自动增益。
 
 ---
 
@@ -436,6 +457,8 @@ ros2 param set /hikrobot_camera frame_rate -1
 ```text
 frame_rate must be greater than 0.
 ```
+
+自动曝光/自动增益关闭失败、SDK 返回非零错误码，也会被节点拒绝并输出原因。
 
 ---
 
@@ -490,7 +513,9 @@ MV_CC_StartGrabbing()
 
 进入正常采集状态。
 
-程序同时具有连接状态监控和重新枚举机制。当检测到相机不存在时，会释放当前相机句柄，并尝试重新枚举设备。
+程序同时具有连接状态监控和重新枚举机制。当检测到相机不存在、或连续取流失败
+超过阈值时，会释放当前相机句柄、停止抓取，并每 2 秒重新枚举设备；重连成功后
+会重新应用 ROS 2 参数并恢复抓取。
 
 > 注意：不同 USB/MVS 驱动环境在物理拔插后的 SDK 行为可能不同。当前版本已经实现重连机制，但实际硬件断线恢复仍建议在目标运行环境中进行单独验证。
 
@@ -541,6 +566,9 @@ lsusb
 ```
 
 确认 USB 相机已经连接。
+
+如果 MVS 客户端（`/opt/MVS/bin/MVS`）正在运行，请先关闭它；相机被
+MVS 客户端占用时，SDK 枚举可能返回 0，节点会一直显示找不到相机。
 
 也可以使用 MVS 自带示例验证 SDK：
 
@@ -659,6 +687,8 @@ MV_CC_SetEnumValue()
 - `pixel_format` 支持 `Mono8`
 - ROS 2 Launch 和 YAML 配置能够正常工作
 
+以上硬件结果以目标机实际相机为准；断线重连需要在硬件上按下一节步骤复核。
+
 ---
 
 ## 21. 项目启动命令汇总
@@ -726,7 +756,16 @@ ros2 param set /hikrobot_camera frame_rate 30.0
 
 ---
 
-## 22. 总结
+## 22. 断线/重连手动验证
+
+1. 连接相机并启动节点，确认 `/image_raw` 持续发布图像。
+2. 拔掉 USB 线或断开网络相机的网线，观察节点日志出现“camera is no longer detected”或连续取流失败提示。
+3. 重新插回相机，驱动会每 2 秒尝试重新枚举、连接并恢复抓取。
+4. 如果恢复失败，先确认 MVS 自带示例能否重新发现相机，再查看节点终端中的 SDK 错误码。
+
+---
+
+## 23. 总结
 
 本项目实现了一个基于 Hikrobot MVS SDK 的 ROS 2 工业相机驱动节点，实现了从相机设备发现、设备选择、参数配置、图像采集到 ROS 2 图像话题发布的完整流程。
 

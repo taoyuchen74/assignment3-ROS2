@@ -1,5 +1,9 @@
 # SDK 构建集成
 
-你可以按需在这里添加 CMake 模块，用于查找 MVS 的头文件和库。新增模块后，记得在主 `CMakeLists.txt` 中使用它。
+主 `CMakeLists.txt` 使用 `MVS_ROOT` 变量查找 MVS SDK，默认值为 `/opt/MVS`。
 
-查找路径应允许配置，避免只适用于你自己机器上的绝对路径。当前工程尚未接入 SDK。
+在安装到其他路径的环境中，可以覆盖：
+
+```bash
+colcon build --cmake-args -DMVS_ROOT=/path/to/MVS
+```

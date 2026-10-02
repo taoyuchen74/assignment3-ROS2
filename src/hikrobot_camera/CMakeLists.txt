@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.8)
-project(hikrobot_camera)
+project(hikrobot_camera VERSION 1.0.0)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 # Hikrobot MVS SDK
-set(MVS_ROOT /opt/MVS)
+set(MVS_ROOT "/opt/MVS" CACHE PATH
+  "Hikrobot MVS SDK installation root")
 
 set(MVS_INCLUDE_DIR ${MVS_ROOT}/include)
 set(MVS_LIBRARY ${MVS_ROOT}/lib/64/libMvCameraControl.so)
@@ -39,6 +41,7 @@ target_include_directories(camera_node PRIVATE
 
 ament_target_dependencies(camera_node
   rclcpp
+  rcl_interfaces
   sensor_msgs
 )
 
