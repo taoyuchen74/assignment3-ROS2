@@ -29,38 +29,56 @@ private:
 
   // Image acquisition
   void grab_image();
-  void reconnect_camera();
   void publish_image(const MV_FRAME_OUT & frame);
 
-  // Parameters
-  rcl_interfaces::msg::SetParametersResult on_parameter_change(
+  // Connection monitoring
+  void monitor_camera_connection();
+  void reconnect_camera();
+
+  // Parameter callback
+  rcl_interfaces::msg::SetParametersResult
+  on_parameter_change(
     const std::vector<rclcpp::Parameter> & parameters);
 
+  // Camera parameter helpers
   bool set_float_parameter(
     const std::string & name,
     const std::string & sdk_name,
     double value);
 
   bool set_frame_rate(double value);
-  bool set_pixel_format(const std::string & value);
 
-  // Utilities
+  bool set_pixel_format(
+    const std::string & value);
+
+  // Utility
   std::string get_serial_number(
     const MV_CC_DEVICE_INFO * device) const;
 
-  std::string ip_to_string(unsigned int ip) const;
+  std::string ip_to_string(
+    unsigned int ip) const;
+
+  bool current_camera_present() const;
 
   // MVS camera
   void * camera_handle_{nullptr};
+
   MV_CC_DEVICE_INFO_LIST device_list_{};
 
-  // ROS2
+  // ROS timers
   rclcpp::TimerBase::SharedPtr grab_timer_;
-  rclcpp::TimerBase::SharedPtr reconnect_timer_;
 
+  rclcpp::TimerBase::SharedPtr
+    connection_monitor_timer_;
+
+  rclcpp::TimerBase::SharedPtr
+    reconnect_timer_;
+
+  // Publisher
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr
     image_publisher_;
 
+  // Parameter callback
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
     parameter_callback_handle_;
 
@@ -77,6 +95,10 @@ private:
   // State
   bool connected_{false};
   bool grabbing_{false};
+
+  int consecutive_grab_failures_{0};
+
+  bool reconnecting_{false};
 };
 
 }  // namespace hikrobot_camera

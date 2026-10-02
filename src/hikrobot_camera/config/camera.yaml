@@ -8,10 +8,13 @@
     # Camera selection
     # ============================================================
 
-    # USB camera does not use an IP address.
+    # GigE camera IP address.
+    # Leave empty when using a USB camera.
     camera_ip: ""
 
-    # Your Hikrobot camera serial number.
+    # Camera serial number.
+    # The current camera used for testing:
+    # DB0178696
     serial_number: "DB0178696"
 
     # ============================================================
@@ -24,14 +27,14 @@
     # Camera parameters
     # ============================================================
 
-    # Exposure time, unit: microsecond
+    # Exposure time in microseconds.
     exposure_time: 10000.0
 
-    # Camera gain
+    # Camera gain.
     gain: 0.0
 
-    # Acquisition frame rate
+    # Acquisition frame rate.
     frame_rate: 30.0
 
-    # Pixel format
+    # Currently supported pixel format.
     pixel_format: "Mono8"
